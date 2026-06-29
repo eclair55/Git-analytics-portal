@@ -26,6 +26,8 @@ namespace GitAnalyticsDashboard
                 .AddSingleton<CommitAnalyzer>()
                 .AddSingleton<DeveloperAnalyzer>()
                 .AddSingleton<FileAnalyzer>()
+                .AddSingleton<CodeChangeAnalyzer>()
+                .AddSingleton<ComparisonService>()
                 .AddSingleton<StatisticsService>()
                 .AddSingleton<ReportOrchestrator>()
                 .AddSingleton<HtmlReportGenerator>()
@@ -41,6 +43,7 @@ namespace GitAnalyticsDashboard
             var outputDir = configuration.GetValue<string>("ReportConfig:OutputDirectory") ?? "./Reports";
             var staleThreshold = configuration.GetValue<int>("ReportConfig:StaleBranchThresholdDays", 30);
             var reportTitle = configuration.GetValue<string>("ReportConfig:ReportTitle") ?? "Git Analytics";
+            var comparisonLimit = configuration.GetValue<int>("ReportConfig:ComparisonLimit", 100);
 
             //foreach (var path in repoPaths)
             //{
@@ -76,7 +79,7 @@ namespace GitAnalyticsDashboard
                     break;
                 }
 
-                var reportData = orchestrator.Analyze(fullPath, staleThreshold);
+                var reportData = orchestrator.Analyze(fullPath, staleThreshold, null, comparisonLimit);
 
                 var repoOutputDir = Path.Combine(outputDir, reportData.Summary.RepositoryName);
                     htmlGenerator.Generate(reportData, repoOutputDir, reportTitle);
