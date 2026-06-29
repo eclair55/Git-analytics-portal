@@ -15,6 +15,7 @@ namespace GitAnalyticsDashboard.Services
         private readonly DeveloperAnalyzer _developerAnalyzer;
         private readonly FileAnalyzer _fileAnalyzer;
         private readonly StatisticsService _statisticsService;
+        private readonly ComparisonService _comparisonService;
 
         public ReportOrchestrator(
             ILogger<ReportOrchestrator> logger,
@@ -22,7 +23,8 @@ namespace GitAnalyticsDashboard.Services
             CommitAnalyzer commitAnalyzer,
             DeveloperAnalyzer developerAnalyzer,
             FileAnalyzer fileAnalyzer,
-            StatisticsService statisticsService)
+            StatisticsService statisticsService,
+            ComparisonService comparisonService)
         {
             _logger = logger;
             _branchAnalyzer = branchAnalyzer;
@@ -30,9 +32,10 @@ namespace GitAnalyticsDashboard.Services
             _developerAnalyzer = developerAnalyzer;
             _fileAnalyzer = fileAnalyzer;
             _statisticsService = statisticsService;
+            _comparisonService = comparisonService;
         }
 
-        public ReportData Analyze(string path, int staleThresholdDays, string? defaultBranchName = null)
+        public ReportData Analyze(string path, int staleThresholdDays, string? defaultBranchName = null, int comparisonLimit = 100)
         {
             _logger.LogInformation("Analyzing repository at {Path}", path);
             var reportData = new ReportData();
@@ -45,10 +48,17 @@ namespace GitAnalyticsDashboard.Services
                     mainBranch = repo.Branches.First(b => b.IsCurrentRepositoryHead);
                 }
 
+                if (mainBranch == null)
+                {
+                    _logger.LogWarning("No suitable branch found for analysis.");
+                    return reportData;
+                }
+
                 reportData.Branches = _branchAnalyzer.Analyze(repo, staleThresholdDays, mainBranch);
                 reportData.RecentCommits = _commitAnalyzer.Analyze(repo);
                 reportData.Developers = _developerAnalyzer.Analyze(reportData.RecentCommits);
                 reportData.FileHotspots = _fileAnalyzer.Analyze(repo);
+                reportData.Comparisons = _comparisonService.Analyze(repo, mainBranch, comparisonLimit);
                 reportData.Summary = _statisticsService.GenerateSummary(repo, reportData);
             }
 

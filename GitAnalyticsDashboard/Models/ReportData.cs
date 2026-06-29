@@ -9,5 +9,6 @@ namespace GitAnalyticsDashboard.Models
         public List<CommitInfo> RecentCommits { get; set; } = new();
         public List<DeveloperInfo> Developers { get; set; } = new();
         public List<FileStatistic> FileHotspots { get; set; } = new();
+        public List<CommitComparison> Comparisons { get; set; } = new();
     }
 }
