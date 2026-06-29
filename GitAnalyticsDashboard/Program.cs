@@ -42,30 +42,53 @@ namespace GitAnalyticsDashboard
             var staleThreshold = configuration.GetValue<int>("ReportConfig:StaleBranchThresholdDays", 30);
             var reportTitle = configuration.GetValue<string>("ReportConfig:ReportTitle") ?? "Git Analytics";
 
-            foreach (var path in repoPaths)
-            {
-                try
+            //foreach (var path in repoPaths)
+            //{
+                //try
+                //{
+                string fullPath;
+
+                while (true)
                 {
-                    var fullPath = Path.GetFullPath(path);
-                    if (!LibGit2Sharp.Repository.IsValid(fullPath))
+                    Console.Write("Enter Git repository path: ");
+                    var input = Console.ReadLine();
+
+                    if (string.IsNullOrWhiteSpace(input))
                     {
-                        logger.LogWarning("Path {Path} is not a valid Git repository. Skipping.", fullPath);
+                        Console.WriteLine("Path cannot be empty.\n");
                         continue;
                     }
 
-                    var reportData = orchestrator.Analyze(fullPath, staleThreshold);
+                    fullPath = Path.GetFullPath(input);
 
-                    var repoOutputDir = Path.Combine(outputDir, reportData.Summary.RepositoryName);
+                    if (!Directory.Exists(fullPath))
+                    {
+                        Console.WriteLine("Directory does not exist.\n");
+                        continue;
+                    }
+
+                    if (!LibGit2Sharp.Repository.IsValid(fullPath))
+                    {
+                        Console.WriteLine("Not a valid Git repository.\n");
+                        continue;
+                    }
+
+                    break;
+                }
+
+                var reportData = orchestrator.Analyze(fullPath, staleThreshold);
+
+                var repoOutputDir = Path.Combine(outputDir, reportData.Summary.RepositoryName);
                     htmlGenerator.Generate(reportData, repoOutputDir, reportTitle);
                     excelGenerator.Generate(reportData, Path.Combine(repoOutputDir, "report.xlsx"));
 
                     logger.LogInformation("Reports generated successfully for {Repo} in {Dir}", reportData.Summary.RepositoryName, repoOutputDir);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Error processing repository at {Path}", path);
-                }
-            }
+                //}
+                //catch (Exception ex)
+                //{
+                //    logger.LogError(ex, "Error processing repository at {Path}", fullPath);
+                //}
+            //}
         }
     }
 }
