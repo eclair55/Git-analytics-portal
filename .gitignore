@@ -1,0 +1,6 @@
+bin/
+obj/
+Reports/
+*.user
+*.suo
+.DS_Store
