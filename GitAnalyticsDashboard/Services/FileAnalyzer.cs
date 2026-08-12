@@ -9,12 +9,17 @@ namespace GitAnalyticsDashboard.Services
     {
         public List<FileStatistic> Analyze(Repository repo, int commitLimit = 500)
         {
+            return Analyze(repo, repo.Commits.Take(commitLimit).ToList());
+        }
+
+        public List<FileStatistic> Analyze(Repository repo, List<Commit> commits)
+        {
             var fileStats = new Dictionary<string, FileStatistic>();
             var fileAuthors = new Dictionary<string, HashSet<string>>();
 
-            foreach (var commit in repo.Commits.Take(commitLimit))
+            foreach (var commit in commits)
             {
-                var author = commit.Author.Email;
+                var author = commit.Author.Email ?? string.Empty;
 
                 if (commit.Parents.Any())
                 {

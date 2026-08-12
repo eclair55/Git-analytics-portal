@@ -64,5 +64,68 @@ namespace GitAnalyticsDashboard.Services
 
             return reportData;
         }
+
+        public ReportData AnalyzeWithStartingBranch(
+            string path,
+            string startingBranchName,
+            List<Commit> scannedCommits,
+            Dictionary<string, List<string>> commitBranchMap,
+            int staleThresholdDays,
+            int comparisonLimit = 100)
+        {
+            _logger.LogInformation("Analyzing repository at {Path} starting from {StartingBranch}", path, startingBranchName);
+            var reportData = new ReportData();
+
+            using (var repo = new Repository(path))
+            {
+                var startingBranch = repo.Branches[startingBranchName];
+
+                reportData.Branches = _branchAnalyzer.Analyze(repo, staleThresholdDays, startingBranch);
+
+                // Convert scanned commits to CommitInfo using our commitBranchMap and parent diffs
+                var commitInfos = new List<CommitInfo>();
+                foreach (var commit in scannedCommits)
+                {
+                    var branchList = commitBranchMap.TryGetValue(commit.Sha, out var bList) ? bList : new List<string> { "detached" };
+                    var branchesString = string.Join(", ", branchList.OrderBy(b => b));
+
+                    var info = new CommitInfo
+                    {
+                        Sha = commit.Sha,
+                        Author = commit.Author.Name,
+                        Email = commit.Author.Email ?? string.Empty,
+                        Date = commit.Author.When,
+                        Message = commit.MessageShort,
+                        Branch = branchesString
+                    };
+
+                    if (commit.Parents.Any())
+                    {
+                        var parent = commit.Parents.First();
+                        var diff = repo.Diff.Compare<Patch>(parent.Tree, commit.Tree);
+                        info.FilesChanged = diff.Count();
+                        info.Insertions = diff.LinesAdded;
+                        info.Deletions = diff.LinesDeleted;
+                    }
+                    else
+                    {
+                        var diff = repo.Diff.Compare<Patch>(null, commit.Tree);
+                        info.FilesChanged = diff.Count();
+                        info.Insertions = diff.LinesAdded;
+                        info.Deletions = diff.LinesDeleted;
+                    }
+
+                    commitInfos.Add(info);
+                }
+
+                reportData.RecentCommits = commitInfos;
+                reportData.Developers = _developerAnalyzer.Analyze(reportData.RecentCommits);
+                reportData.FileHotspots = _fileAnalyzer.Analyze(repo, scannedCommits);
+                reportData.Comparisons = _comparisonService.Analyze(repo, scannedCommits.Take(comparisonLimit).ToList(), commitBranchMap);
+                reportData.Summary = _statisticsService.GenerateSummary(repo, reportData);
+            }
+
+            return reportData;
+        }
     }
 }

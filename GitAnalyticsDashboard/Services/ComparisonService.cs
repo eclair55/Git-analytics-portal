@@ -19,20 +19,27 @@ namespace GitAnalyticsDashboard.Services
 
         public List<CommitComparison> Analyze(Repository repo, Branch targetBranch, int limit = 100)
         {
-            var comparisons = new List<CommitComparison>();
-            var branchName = targetBranch.FriendlyName;
+            var commits = repo.Commits.QueryBy(new CommitFilter { IncludeReachableFrom = targetBranch }).Take(limit).ToList();
+            var commitBranchMap = commits.ToDictionary(c => c.Sha, c => new List<string> { targetBranch.FriendlyName });
+            return Analyze(repo, commits, commitBranchMap);
+        }
 
-            var commits = repo.Commits.QueryBy(new CommitFilter { IncludeReachableFrom = targetBranch }).Take(limit);
+        public List<CommitComparison> Analyze(Repository repo, List<Commit> commits, Dictionary<string, List<string>> commitBranchMap)
+        {
+            var comparisons = new List<CommitComparison>();
 
             foreach (var commit in commits)
             {
+                var branchList = commitBranchMap.TryGetValue(commit.Sha, out var bList) ? bList : new List<string> { "detached" };
+                var branchesString = string.Join(", ", branchList.OrderBy(b => b));
+
                 var comparison = new CommitComparison
                 {
                     Sha = commit.Sha,
                     Author = commit.Author.Name,
                     Date = commit.Author.When,
                     Message = commit.MessageShort,
-                    Branch = branchName
+                    Branch = branchesString
                 };
 
                 var parent = commit.Parents.FirstOrDefault();
@@ -50,7 +57,8 @@ namespace GitAnalyticsDashboard.Services
                     // Get Before Content
                     if (parent != null && (change.Status == ChangeKind.Modified || change.Status == ChangeKind.Deleted || change.Status == ChangeKind.Renamed))
                     {
-                        var oldEntry = parent[change.OldPath];
+                        var oldPath = change.OldPath ?? change.Path;
+                        var oldEntry = parent[oldPath];
                         if (oldEntry != null && oldEntry.TargetType == TreeEntryTargetType.Blob)
                         {
                             var blob = (Blob)oldEntry.Target;

@@ -32,66 +32,105 @@ namespace GitAnalyticsDashboard
                 .AddSingleton<ReportOrchestrator>()
                 .AddSingleton<HtmlReportGenerator>()
                 .AddSingleton<ExcelReportGenerator>()
+                .AddSingleton<GitScanningService>()
                 .BuildServiceProvider();
 
             var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
             var orchestrator = serviceProvider.GetRequiredService<ReportOrchestrator>();
             var htmlGenerator = serviceProvider.GetRequiredService<HtmlReportGenerator>();
             var excelGenerator = serviceProvider.GetRequiredService<ExcelReportGenerator>();
+            var scanningService = serviceProvider.GetRequiredService<GitScanningService>();
 
-            var repoPaths = configuration.GetSection("ReportConfig:RepositoryPaths").Get<string[]>() ?? new[] { "." };
             var outputDir = configuration.GetValue<string>("ReportConfig:OutputDirectory") ?? "./Reports";
             var staleThreshold = configuration.GetValue<int>("ReportConfig:StaleBranchThresholdDays", 30);
             var reportTitle = configuration.GetValue<string>("ReportConfig:ReportTitle") ?? "Git Analytics";
             var comparisonLimit = configuration.GetValue<int>("ReportConfig:ComparisonLimit", 100);
 
-            //foreach (var path in repoPaths)
-            //{
-                //try
-                //{
-                string fullPath;
+            Console.WriteLine("Git Analytics\n");
 
-                while (true)
+            // 1. Prompt and Validate Repository Path
+            Console.WriteLine("Repository path:");
+            var repoPathInput = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(repoPathInput))
+            {
+                Console.WriteLine("Invalid Git repository path.");
+                return;
+            }
+            var fullPath = Path.GetFullPath(repoPathInput);
+            if (!scanningService.ValidateRepositoryPath(fullPath))
+            {
+                Console.WriteLine("Invalid Git repository path.");
+                return;
+            }
+
+            // 2. Prompt Starting Branch Name
+            Console.WriteLine("Starting branch:");
+            var startingBranchName = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(startingBranchName))
+            {
+                Console.WriteLine("Branch not found: ");
+                return;
+            }
+            startingBranchName = startingBranchName.Trim();
+
+            // 3. Resolve starting branch and commit
+            using (var repo = new LibGit2Sharp.Repository(fullPath))
+            {
+                var startingBranch = scanningService.ResolveStartingBranch(repo, startingBranchName);
+                if (startingBranch == null)
                 {
-                    Console.Write("Enter Git repository path: ");
-                    var input = Console.ReadLine();
-
-                    if (string.IsNullOrWhiteSpace(input))
-                    {
-                        Console.WriteLine("Path cannot be empty.\n");
-                        continue;
-                    }
-
-                    fullPath = Path.GetFullPath(input);
-
-                    if (!Directory.Exists(fullPath))
-                    {
-                        Console.WriteLine("Directory does not exist.\n");
-                        continue;
-                    }
-
-                    if (!LibGit2Sharp.Repository.IsValid(fullPath))
-                    {
-                        Console.WriteLine("Not a valid Git repository.\n");
-                        continue;
-                    }
-
-                    break;
+                    Console.WriteLine($"Branch not found: {startingBranchName}");
+                    return;
                 }
 
-                var reportData = orchestrator.Analyze(fullPath, staleThreshold, null, comparisonLimit);
+                Console.WriteLine($"\nScanning from branch: {startingBranchName}");
+                Console.WriteLine("Scanning commits up to latest commit...");
+
+                var startingCommit = startingBranch.Tip;
+                var latestCommit = repo.Head.Tip;
+
+                // 4. Commit traversal
+                var scannedCommits = scanningService.GetCommitsForScan(repo, startingCommit, latestCommit);
+
+                // Check if any commits after starting branch (or if the only descendant commit is the startingCommit itself,
+                // meaning there are no subsequent/new commits after starting branch).
+                if (!scannedCommits.Any(c => c.Sha != startingCommit.Sha))
+                {
+                    Console.WriteLine("No commits found after the specified starting branch.");
+                    return;
+                }
+
+                // 5. Branch detection
+                var commitBranchMap = scanningService.GetCommitBranchMap(repo);
+
+                // 6. File change extraction
+                var fileChanges = scanningService.ExtractFileChanges(repo, scannedCommits, commitBranchMap);
+
+                // 7. Result sorting (newest first)
+                var sortedChanges = scanningService.SortFileChanges(fileChanges);
+
+                Console.WriteLine("\nCompleted.\n");
+                Console.WriteLine($"Total commits analyzed: {scannedCommits.Count}");
+                Console.WriteLine($"Total file changes: {fileChanges.Count}");
+
+                // 8. Output/export to console
+                scanningService.PrintToConsole(sortedChanges);
+
+                // Produce report data for preservation of HTML/Excel reports
+                var reportData = orchestrator.AnalyzeWithStartingBranch(
+                    fullPath,
+                    startingBranchName,
+                    scannedCommits,
+                    commitBranchMap,
+                    staleThreshold,
+                    comparisonLimit);
 
                 var repoOutputDir = Path.Combine(outputDir, reportData.Summary.RepositoryName);
-                    htmlGenerator.Generate(reportData, repoOutputDir, reportTitle);
-                    excelGenerator.Generate(reportData, Path.Combine(repoOutputDir, "report.xlsx"));
+                htmlGenerator.Generate(reportData, repoOutputDir, reportTitle);
+                excelGenerator.Generate(reportData, Path.Combine(repoOutputDir, "report.xlsx"));
 
-                    logger.LogInformation("Reports generated successfully for {Repo} in {Dir}", reportData.Summary.RepositoryName, repoOutputDir);
-                //}
-                //catch (Exception ex)
-                //{
-                //    logger.LogError(ex, "Error processing repository at {Path}", fullPath);
-                //}
-            //}
+                logger.LogInformation("Reports generated successfully for {Repo} in {Dir}", reportData.Summary.RepositoryName, repoOutputDir);
+            }
         }
     }
 }
