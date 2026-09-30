@@ -9,7 +9,7 @@ using Xunit;
 
 namespace GitAnalyticsDashboard.Tests
 {
-    public class GitScanningServiceTests : IDisposable
+    public partial class GitScanningServiceTests : IDisposable
     {
         private readonly string _tempRepoPath;
         private readonly GitScanningService _scanningService;
@@ -48,6 +48,33 @@ namespace GitAnalyticsDashboard.Tests
             var sigDate = date ?? DateTimeOffset.Now;
             var signature = new Signature(authorName, authorEmail, sigDate);
             repo.Commit(commitMessage, signature, signature);
+        }
+
+        private static ReportOrchestrator CreateOrchestrator()
+        {
+            return new ReportOrchestrator(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<ReportOrchestrator>.Instance,
+                new BranchAnalyzer(), new CommitAnalyzer(), new DeveloperAnalyzer(), new FileAnalyzer(),
+                new StatisticsService(), new ComparisonService(new CodeChangeAnalyzer()),
+                new ModuleAnalyzer(), new ReleaseNotesGenerator());
+        }
+
+        private Commit CommitFiles(Repository repo, string commitMessage, params (string Path, string Content)[] files)
+        {
+            foreach (var (relativePath, content) in files)
+            {
+                var fullPath = Path.Combine(_tempRepoPath, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                File.WriteAllText(fullPath, content);
+                Commands.Stage(repo, relativePath);
+            }
+            var signature = new Signature("John Doe", "john@example.com", DateTimeOffset.Now);
+            return repo.Commit(commitMessage, signature, signature);
+        }
+
+        private ScanResult ScanFromRelease(Repository repo, ScanOptions? options = null)
+        {
+            return _scanningService.Scan(repo, _scanningService.ResolveReference(repo, "release/1.0")!, _scanningService.ResolveHead(repo)!, options);
         }
 
         private void DeleteFile(Repository repo, string relativePath, string commitMessage)
@@ -337,6 +364,170 @@ namespace GitAnalyticsDashboard.Tests
                 Assert.Contains(scannedCommits, c => c.MessageShort == "Commit After 1");
                 Assert.Contains(scannedCommits, c => c.MessageShort == "Commit Before 2"); // Starting branch tip is included as the start point of the scan
                 Assert.DoesNotContain(scannedCommits, c => c.MessageShort == "Commit Before 1"); // Unrelated/ancestral history before starting branch's parent
+            }
+        }
+
+        [Fact]
+        public void Test_15_FeatureBranchForkedBeforeStartIsScannedOnceMerged()
+        {
+            using (var repo = new Repository(_tempRepoPath))
+            {
+                CommitFile(repo, "base.txt", "base", "Initial commit");
+                var mainName = repo.Head.FriendlyName;
+
+                // Feature branch forks before the starting point...
+                var featureBranch = repo.CreateBranch("feature/early");
+                CommitFile(repo, "release.txt", "release", "Release prep");
+                repo.CreateBranch("release/1.0");
+
+                Commands.Checkout(repo, featureBranch);
+                CommitFile(repo, "feature_file.txt", "feature content", "Feature commit");
+
+                // ...and is merged after it
+                Commands.Checkout(repo, repo.Branches[mainName]);
+                var signature = new Signature("John Doe", "john@example.com", DateTimeOffset.Now);
+                repo.Merge(repo.Branches["feature/early"], signature, new MergeOptions());
+
+                var scan = _scanningService.Scan(repo, _scanningService.ResolveReference(repo, "release/1.0")!, _scanningService.ResolveHead(repo)!);
+
+                Assert.Contains(scan.Commits, c => c.MessageShort == "Feature commit");
+                Assert.DoesNotContain(scan.Commits, c => c.MessageShort == "Initial commit");
+                Assert.Contains(scan.CommitInfos, c => c.IsMerge);
+
+                // Reported once by the feature commit, not again by the merge commit
+                var featureChange = Assert.Single(scan.FileChanges, c => c.FilePath == "feature_file.txt");
+                Assert.Contains("feature/early", featureChange.Branch);
+            }
+        }
+
+        [Fact]
+        public void Test_16_ScanToExplicitTargetBranch()
+        {
+            using (var repo = new Repository(_tempRepoPath))
+            {
+                CommitFile(repo, "base.txt", "base", "Initial commit");
+                var mainName = repo.Head.FriendlyName;
+                repo.CreateBranch("release/1.0");
+
+                var featureBranch = repo.CreateBranch("feature/target");
+                Commands.Checkout(repo, featureBranch);
+                CommitFile(repo, "target_only.txt", "content", "Target commit");
+                Commands.Checkout(repo, repo.Branches[mainName]);
+
+                var start = _scanningService.ResolveReference(repo, "release/1.0")!;
+                var headScan = _scanningService.Scan(repo, start, _scanningService.ResolveHead(repo)!);
+                var targetScan = _scanningService.Scan(repo, start, _scanningService.ResolveReference(repo, "feature/target")!);
+
+                Assert.Equal(0, headScan.NewCommitCount);
+                Assert.Equal(1, targetScan.NewCommitCount);
+                Assert.Contains(targetScan.FileChanges, c => c.FilePath == "target_only.txt");
+                Assert.True(targetScan.StartIsAncestorOfTarget);
+            }
+        }
+
+        [Fact]
+        public void Test_17_ResolveReferenceAcceptsTagsShasAndRemoteBranches()
+        {
+            using (var repo = new Repository(_tempRepoPath))
+            {
+                CommitFile(repo, "base.txt", "base", "Initial commit");
+                var commit = repo.Head.Tip;
+                var signature = new Signature("John Doe", "john@example.com", DateTimeOffset.Now);
+                repo.ApplyTag("v1.0", signature, "Release 1.0");
+                repo.Refs.Add("refs/remotes/origin/feature/remote-only", commit.Id);
+
+                Assert.Equal(commit.Sha, _scanningService.ResolveReference(repo, "v1.0")?.Commit.Sha);
+                Assert.Equal(commit.Sha, _scanningService.ResolveReference(repo, commit.Sha[..8])?.Commit.Sha);
+
+                var remote = _scanningService.ResolveReference(repo, "feature/remote-only");
+                Assert.NotNull(remote);
+                Assert.Equal("origin/feature/remote-only", remote!.Name);
+
+                Assert.Null(_scanningService.ResolveReference(repo, "does-not-exist"));
+            }
+        }
+
+        [Fact]
+        public void Test_18_ScanRecordsLineCountsAndScopedBranchMap()
+        {
+            using (var repo = new Repository(_tempRepoPath))
+            {
+                CommitFile(repo, "lines.txt", "one\ntwo\n", "Initial commit");
+                repo.CreateBranch("release/1.0");
+                CommitFile(repo, "lines.txt", "one\nTWO\nthree\n", "Edit lines");
+
+                var scan = _scanningService.Scan(repo, _scanningService.ResolveReference(repo, "release/1.0")!, _scanningService.ResolveHead(repo)!);
+
+                var change = scan.FileChanges.Single(c => c.CommitMessage == "Edit lines");
+                Assert.Equal(2, change.LinesAdded);
+                Assert.Equal(1, change.LinesDeleted);
+
+                var commitInfo = scan.CommitInfos.Single(c => c.Message == "Edit lines");
+                Assert.Equal(1, commitInfo.FilesChanged);
+                Assert.Equal(2, commitInfo.Insertions);
+
+                // Branch map only covers scanned commits
+                Assert.All(scan.CommitBranchMap.Keys, sha => Assert.Contains(scan.Commits, c => c.Sha == sha));
+            }
+        }
+
+        [Fact]
+        public void Test_19_ReportsAreGeneratedForScan()
+        {
+            var outputDir = _tempRepoPath + "_reports";
+            try
+            {
+                using (var repo = new Repository(_tempRepoPath))
+                {
+                    CommitFile(repo, "base.txt", "base", "Initial commit");
+                    repo.CreateBranch("release/1.0");
+                    CommitFile(repo, "src/Tom&Jerry.cs", "class Feature { }", "Add <Feature>");
+                    RenameFile(repo, "base.txt", "renamed.txt", "Rename base");
+
+                    var scan = _scanningService.Scan(repo, _scanningService.ResolveReference(repo, "release/1.0")!, _scanningService.ResolveHead(repo)!);
+
+                    var reportData = CreateOrchestrator().AnalyzeScan(repo, scan, 30);
+
+                    Assert.True(reportData.Summary.IsScopedScan);
+                    Assert.Equal(scan.Commits.Count, reportData.Summary.TotalCommits);
+                    Assert.Equal(scan.FileChanges.Count, reportData.Summary.TotalFileChanges);
+                    Assert.Equal(1, reportData.Summary.FilesRenamed);
+                    Assert.Contains(reportData.FileHotspots, f => f.Path == "src/Tom&Jerry.cs");
+
+                    new HtmlReportGenerator().Generate(reportData, outputDir, "Test Report");
+                    new ExcelReportGenerator().Generate(reportData, Path.Combine(outputDir, "report.xlsx"));
+
+                    var html = File.ReadAllText(Path.Combine(outputDir, "index.html"));
+                    Assert.Contains("Scan range:", html);
+                    Assert.Contains("id=\"fileChangesTable\"", html);
+                    Assert.Contains("src/Tom&amp;Jerry.cs", html); // File and commit text is HTML-encoded
+                    Assert.Contains("Add &lt;Feature&gt;", html);
+                    Assert.DoesNotContain("<td>Add <Feature></td>", html);
+
+                    using var workbook = new ClosedXML.Excel.XLWorkbook(Path.Combine(outputDir, "report.xlsx"));
+                    Assert.True(workbook.Worksheets.Contains("File Changes"));
+                    Assert.Equal(scan.FileChanges.Count + 1, workbook.Worksheet("File Changes").RangeUsed()!.RowCount());
+                    Assert.True(workbook.Worksheets.Contains("Modules"));
+                    Assert.True(workbook.Worksheets.Contains("Release Notes"));
+
+                    // Diffs are written to a side file instead of being inlined in the page
+                    Assert.DoesNotContain("data-diff=", html);
+                    Assert.Contains("window.GIT_DIFFS", File.ReadAllText(Path.Combine(outputDir, "assets", "js", "diffs.js")));
+
+                    var jsonPath = Path.Combine(outputDir, "report.json");
+                    new JsonReportGenerator().Generate(reportData, jsonPath);
+                    using var json = System.Text.Json.JsonDocument.Parse(File.ReadAllText(jsonPath));
+                    Assert.Equal(scan.FileChanges.Count, json.RootElement.GetProperty("fileChanges").GetArrayLength());
+                    Assert.True(json.RootElement.GetProperty("modules").GetArrayLength() > 0);
+                    Assert.False(json.RootElement.GetProperty("comparisons")[0].GetProperty("files")[0].TryGetProperty("beforeContent", out _));
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(outputDir))
+                {
+                    Directory.Delete(outputDir, true);
+                }
             }
         }
     }

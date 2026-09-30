@@ -11,7 +11,8 @@ namespace GitAnalyticsDashboard.Services
         public List<BranchInfo> Analyze(Repository repo, int staleThresholdDays, Branch? mainBranch)
         {
             var branches = new List<BranchInfo>();
-            foreach (var branch in repo.Branches.Where(b => !b.IsRemote))
+            // Unborn branches have no tip to report on
+            foreach (var branch in repo.Branches.Where(b => !b.IsRemote && b.Tip != null))
             {
                 var latestCommit = branch.Tip;
                 var branchInfo = new BranchInfo

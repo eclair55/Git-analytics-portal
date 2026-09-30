@@ -8,8 +8,22 @@ using LibGit2Sharp;
 
 namespace GitAnalyticsDashboard.Services
 {
+    public class ComparisonOptions
+    {
+        public PathFilter PathFilter { get; set; } = PathFilter.None;
+        public Mailmap Mailmap { get; set; } = Mailmap.Empty;
+
+        /// <summary>Files larger than this (either side) keep their diff summary but no before/after contents.</summary>
+        public long MaxFileBytes { get; set; } = 256 * 1024;
+
+        /// <summary>Diffs longer than this are cut, keeping the report size bounded.</summary>
+        public int MaxDiffChars { get; set; } = 200_000;
+    }
+
     public class ComparisonService
     {
+        private const string TruncatedMarker = "\n\\ Diff truncated: exceeds the configured MaxDiffChars limit\n";
+
         private readonly CodeChangeAnalyzer _codeChangeAnalyzer;
 
         public ComparisonService(CodeChangeAnalyzer codeChangeAnalyzer)
@@ -24,8 +38,10 @@ namespace GitAnalyticsDashboard.Services
             return Analyze(repo, commits, commitBranchMap);
         }
 
-        public List<CommitComparison> Analyze(Repository repo, List<Commit> commits, Dictionary<string, List<string>> commitBranchMap)
+        public List<CommitComparison> Analyze(Repository repo, List<Commit> commits, Dictionary<string, List<string>> commitBranchMap, ComparisonOptions? options = null)
         {
+            options ??= new ComparisonOptions();
+            var compareOptions = new CompareOptions { Similarity = SimilarityOptions.Renames };
             var comparisons = new List<CommitComparison>();
 
             foreach (var commit in commits)
@@ -36,46 +52,59 @@ namespace GitAnalyticsDashboard.Services
                 var comparison = new CommitComparison
                 {
                     Sha = commit.Sha,
-                    Author = commit.Author.Name,
+                    Author = options.Mailmap.Map(commit.Author).Name,
                     Date = commit.Author.When,
                     Message = commit.MessageShort,
                     Branch = branchesString
                 };
 
                 var parent = commit.Parents.FirstOrDefault();
-                var changes = repo.Diff.Compare<Patch>(parent?.Tree, commit.Tree);
+                var changes = repo.Diff.Compare<Patch>(parent?.Tree, commit.Tree, compareOptions);
 
                 foreach (var change in changes)
                 {
+                    if (!options.PathFilter.IsIncluded(change.Path))
+                        continue;
+
                     var fileComp = new FileComparison
                     {
                         Path = change.Path,
                         ChangeType = change.Status.ToString(),
-                        Diff = change.Patch
+                        IsBinary = change.IsBinaryComparison
                     };
 
-                    // Get Before Content
-                    if (parent != null && (change.Status == ChangeKind.Modified || change.Status == ChangeKind.Deleted || change.Status == ChangeKind.Renamed))
+                    var oldBlob = parent != null && (change.Status == ChangeKind.Modified || change.Status == ChangeKind.Deleted || change.Status == ChangeKind.Renamed)
+                        ? GetBlob(parent, change.OldPath ?? change.Path)
+                        : null;
+                    var newBlob = change.Status != ChangeKind.Deleted ? GetBlob(commit, change.Path) : null;
+
+                    fileComp.IsBinary |= (oldBlob?.IsBinary ?? false) || (newBlob?.IsBinary ?? false);
+                    var tooLarge = (oldBlob?.Size ?? 0) > options.MaxFileBytes || (newBlob?.Size ?? 0) > options.MaxFileBytes;
+
+                    if (fileComp.IsBinary)
                     {
-                        var oldPath = change.OldPath ?? change.Path;
-                        var oldEntry = parent[oldPath];
-                        if (oldEntry != null && oldEntry.TargetType == TreeEntryTargetType.Blob)
-                        {
-                            var blob = (Blob)oldEntry.Target;
-                            fileComp.BeforeContent = blob.GetContentText();
-                        }
+                        fileComp.Summary = "Binary file; contents not shown.";
+                        comparison.FileChanges.Add(fileComp);
+                        continue;
                     }
 
-                    // Get After Content
-                    if (change.Status != ChangeKind.Deleted)
+                    fileComp.Diff = change.Patch;
+                    if (fileComp.Diff.Length > options.MaxDiffChars)
                     {
-                        var newEntry = commit[change.Path];
-                        if (newEntry != null && newEntry.TargetType == TreeEntryTargetType.Blob)
-                        {
-                            var blob = (Blob)newEntry.Target;
-                            fileComp.AfterContent = blob.GetContentText();
-                        }
+                        fileComp.Diff = fileComp.Diff[..options.MaxDiffChars] + TruncatedMarker;
+                        fileComp.IsTruncated = true;
                     }
+
+                    if (tooLarge)
+                    {
+                        fileComp.IsTruncated = true;
+                        fileComp.Summary = $"File exceeds {options.MaxFileBytes / 1024} KB; before/after contents not captured.";
+                        comparison.FileChanges.Add(fileComp);
+                        continue;
+                    }
+
+                    fileComp.BeforeContent = oldBlob?.GetContentText() ?? string.Empty;
+                    fileComp.AfterContent = newBlob?.GetContentText() ?? string.Empty;
 
                     fileComp.DetectedChanges = _codeChangeAnalyzer.Analyze(fileComp.Path, fileComp.BeforeContent, fileComp.AfterContent);
                     fileComp.Summary = GenerateFileSummary(fileComp);
@@ -88,6 +117,12 @@ namespace GitAnalyticsDashboard.Services
             }
 
             return comparisons;
+        }
+
+        private static Blob? GetBlob(Commit commit, string path)
+        {
+            var entry = commit[path];
+            return entry != null && entry.TargetType == TreeEntryTargetType.Blob ? (Blob)entry.Target : null;
         }
 
         private string GenerateFileSummary(FileComparison file)
@@ -109,6 +144,9 @@ namespace GitAnalyticsDashboard.Services
 
             var deleted = commit.FileChanges.Where(f => f.ChangeType == "Deleted").Select(f => f.Path).ToList();
             if (deleted.Any()) sb.AppendLine($"Deleted: {string.Join(", ", deleted)}");
+
+            var renamed = commit.FileChanges.Where(f => f.ChangeType == "Renamed").Select(f => f.Path).ToList();
+            if (renamed.Any()) sb.AppendLine($"Renamed: {string.Join(", ", renamed)}");
 
             return sb.ToString();
         }

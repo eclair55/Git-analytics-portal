@@ -26,7 +26,7 @@ namespace GitAnalyticsDashboard.Utilities
                 foreach (var prop in properties)
                 {
                     var val = prop.GetValue(item)?.ToString() ?? "";
-                    if (val.Contains(",") || val.Contains("\""))
+                    if (val.Contains(",") || val.Contains("\"") || val.Contains("\n") || val.Contains("\r"))
                     {
                         val = $"\"{val.Replace("\"", "\"\"")}\"";
                     }

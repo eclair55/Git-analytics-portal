@@ -13,5 +13,6 @@ namespace GitAnalyticsDashboard.Models
         public int FilesChanged { get; set; }
         public int Insertions { get; set; }
         public int Deletions { get; set; }
+        public bool IsMerge { get; set; }
     }
 }

@@ -14,6 +14,18 @@ namespace GitAnalyticsDashboard.Services
             using (var workbook = new XLWorkbook())
             {
                 AddSummarySheet(workbook, data.Summary);
+                if (data.FileChanges.Any())
+                {
+                    AddFileChangesSheet(workbook, data.FileChanges);
+                }
+                if (data.Modules.Any())
+                {
+                    AddModulesSheet(workbook, data.Modules);
+                }
+                if (data.ReleaseNotes != null && data.ReleaseNotes.Sections.Any())
+                {
+                    AddReleaseNotesSheet(workbook, data.ReleaseNotes);
+                }
                 AddBranchesSheet(workbook, data.Branches);
                 AddDevelopersSheet(workbook, data.Developers);
                 AddCommitsSheet(workbook, data.RecentCommits);
@@ -27,26 +39,131 @@ namespace GitAnalyticsDashboard.Services
         private void AddSummarySheet(XLWorkbook workbook, RepositorySummary summary)
         {
             var ws = workbook.Worksheets.Add("Summary");
-            ws.Cell(1, 1).Value = "Repository Name"; ws.Cell(1, 2).Value = summary.RepositoryName;
-            ws.Cell(2, 1).Value = "Total Commits"; ws.Cell(2, 2).Value = summary.TotalCommits;
-            ws.Cell(3, 1).Value = "Total Branches"; ws.Cell(3, 2).Value = summary.TotalBranches;
-            ws.Cell(4, 1).Value = "Active Developers"; ws.Cell(4, 2).Value = summary.ActiveDevelopers;
-            ws.Cell(5, 1).Value = "Commits Today"; ws.Cell(5, 2).Value = summary.CommitsToday;
-            ws.Cell(6, 1).Value = "Commits (Month)"; ws.Cell(6, 2).Value = summary.CommitsThisMonth;
-            ws.Cell(7, 1).Value = "Stale Branches"; ws.Cell(7, 2).Value = summary.StaleBranches;
-            ws.Cell(8, 1).Value = "Average Branch Age (Days)"; ws.Cell(8, 2).Value = Math.Round(summary.AverageBranchAgeDays, 2);
-            ws.Cell(9, 1).Value = "Most Active Developer"; ws.Cell(9, 2).Value = summary.MostActiveDeveloper;
 
-            var rngTable = ws.Range(1, 1, 9, 2);
+            var rows = new List<(string Label, XLCellValue Value)>
+            {
+                ("Repository Name", summary.RepositoryName)
+            };
+            if (summary.IsScopedScan)
+            {
+                rows.Add(("Starting Branch", $"{summary.StartingRef} ({ShortSha(summary.StartingCommitSha)})"));
+                rows.Add(("Target Branch", $"{summary.TargetRef} ({ShortSha(summary.TargetCommitSha)})"));
+                rows.Add(("Start Is Ancestor Of Target", summary.StartIsAncestorOfTarget ? "Yes" : "No"));
+            }
+            rows.Add((summary.IsScopedScan ? "Commits Scanned" : "Total Commits", summary.TotalCommits));
+            if (summary.IsScopedScan)
+            {
+                rows.Add(("Merge Commits", summary.MergeCommits));
+                rows.Add(("File Changes", summary.TotalFileChanges));
+                rows.Add(("Files Touched", summary.UniqueFilesChanged));
+                rows.Add(("Files Added", summary.FilesAdded));
+                rows.Add(("Files Modified", summary.FilesModified));
+                rows.Add(("Files Deleted", summary.FilesDeleted));
+                rows.Add(("Files Renamed", summary.FilesRenamed));
+                rows.Add(("Lines Added", summary.TotalLinesAdded));
+                rows.Add(("Lines Deleted", summary.TotalLinesDeleted));
+            }
+            rows.Add(("Total Branches", summary.TotalBranches));
+            rows.Add(("Active Developers", summary.ActiveDevelopers));
+            rows.Add(("Commits Today", summary.CommitsToday));
+            rows.Add(("Commits (Month)", summary.CommitsThisMonth));
+            var staleRow = rows.Count + 1;
+            rows.Add(("Stale Branches", summary.StaleBranches));
+            rows.Add(("Average Branch Age (Days)", Math.Round(summary.AverageBranchAgeDays, 2)));
+            rows.Add(("Most Active Developer", summary.MostActiveDeveloper));
+
+            for (var i = 0; i < rows.Count; i++)
+            {
+                ws.Cell(i + 1, 1).Value = rows[i].Label;
+                ws.Cell(i + 1, 2).Value = rows[i].Value;
+            }
+
+            var rngTable = ws.Range(1, 1, rows.Count, 2);
             rngTable.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
             rngTable.FirstColumn().Style.Font.Bold = true;
             rngTable.FirstColumn().Style.Fill.BackgroundColor = XLColor.LightGray;
 
             // Conditional formatting for stale branches
-            ws.Cell(7, 2).AddConditionalFormat().WhenGreaterThan(5).Fill.SetBackgroundColor(XLColor.Red);
+            ws.Cell(staleRow, 2).AddConditionalFormat().WhenGreaterThan(5).Fill.SetBackgroundColor(XLColor.Red);
 
             ws.Columns().AdjustToContents();
         }
+
+        private void AddFileChangesSheet(XLWorkbook workbook, List<FileChangeInfo> changes)
+        {
+            var ws = workbook.Worksheets.Add("File Changes");
+            var exportData = changes.Select(c => new
+            {
+                Date = c.ChangeDate.DateTime,
+                c.FilePath,
+                c.ChangeType,
+                c.OldPath,
+                Author = c.AuthorName,
+                c.AuthorEmail,
+                Commit = ShortSha(c.CommitHash),
+                c.Branch,
+                Message = c.CommitMessage,
+                c.LinesAdded,
+                c.LinesDeleted
+            });
+            var table = ws.Cell(1, 1).InsertTable(exportData);
+
+            ws.SheetView.FreezeRows(1);
+            table.Theme = XLTableTheme.TableStyleMedium2;
+            ws.Column(1).Style.DateFormat.Format = "yyyy-mm-dd hh:mm:ss";
+            ws.Columns().AdjustToContents();
+        }
+
+        private void AddModulesSheet(XLWorkbook workbook, List<ModuleStatistic> modules)
+        {
+            var ws = workbook.Worksheets.Add("Modules");
+            var exportData = modules.Select(m => new
+            {
+                m.Module,
+                m.ProjectFile,
+                m.Commits,
+                m.FileChanges,
+                m.FilesTouched,
+                m.Contributors,
+                m.Added,
+                m.Modified,
+                m.Deleted,
+                m.Renamed,
+                m.LinesAdded,
+                m.LinesDeleted,
+                m.Churn
+            });
+            var table = ws.Cell(1, 1).InsertTable(exportData);
+
+            ws.SheetView.FreezeRows(1);
+            table.Theme = XLTableTheme.TableStyleMedium2;
+            ws.Columns().AdjustToContents();
+        }
+
+        private void AddReleaseNotesSheet(XLWorkbook workbook, ReleaseNotes notes)
+        {
+            var ws = workbook.Worksheets.Add("Release Notes");
+            var exportData = notes.Sections.SelectMany(s => s.Entries.Select(e => new
+            {
+                Section = s.Title,
+                e.Type,
+                e.Scope,
+                e.Description,
+                Breaking = e.IsBreaking ? "Yes" : string.Empty,
+                e.BreakingNote,
+                Commit = ShortSha(e.Sha),
+                e.Author,
+                Date = e.Date.DateTime,
+                Tickets = string.Join(", ", e.Tickets.Select(t => t.Id))
+            }));
+            var table = ws.Cell(1, 1).InsertTable(exportData);
+
+            ws.SheetView.FreezeRows(1);
+            table.Theme = XLTableTheme.TableStyleMedium2;
+            ws.Columns().AdjustToContents();
+        }
+
+        private static string ShortSha(string sha) => sha.Length > 7 ? sha[..7] : sha;
 
         private void AddBranchesSheet(XLWorkbook workbook, List<BranchInfo> branches)
         {

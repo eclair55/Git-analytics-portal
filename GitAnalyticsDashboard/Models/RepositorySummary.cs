@@ -22,5 +22,25 @@ namespace GitAnalyticsDashboard.Models
         public int UnmergedBranches { get; set; }
         public double AverageBranchAgeDays { get; set; }
         public double AverageCommitsPerBranch { get; set; }
+
+        // Starting-branch scan (populated when the report covers a scan range)
+        public bool IsScopedScan { get; set; }
+        public string StartingRef { get; set; } = string.Empty;
+        public string StartingCommitSha { get; set; } = string.Empty;
+        public string TargetRef { get; set; } = string.Empty;
+        public string TargetCommitSha { get; set; } = string.Empty;
+        public bool StartIsAncestorOfTarget { get; set; } = true;
+        public int MergeCommits { get; set; }
+        public int TotalFileChanges { get; set; }
+        public int UniqueFilesChanged { get; set; }
+        public int FilesAdded { get; set; }
+        public int FilesModified { get; set; }
+        public int FilesDeleted { get; set; }
+        public int FilesRenamed { get; set; }
+        public int TotalLinesAdded { get; set; }
+        public int TotalLinesDeleted { get; set; }
+        public List<string> ActiveFilters { get; set; } = new();
+        public int FilteredOutCommits { get; set; }
+        public int ExcludedFileChanges { get; set; }
     }
 }

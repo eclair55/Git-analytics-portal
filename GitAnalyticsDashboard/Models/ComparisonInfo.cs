@@ -25,5 +25,10 @@ namespace GitAnalyticsDashboard.Models
         public string Summary { get; set; } = string.Empty;
 
         public List<string> DetectedChanges { get; set; } = new();
+
+        public bool IsBinary { get; set; }
+
+        /// <summary>Contents were skipped or the diff was cut because the file exceeded the configured size limits.</summary>
+        public bool IsTruncated { get; set; }
     }
 }

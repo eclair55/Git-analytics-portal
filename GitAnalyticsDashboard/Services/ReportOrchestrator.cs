@@ -16,6 +16,8 @@ namespace GitAnalyticsDashboard.Services
         private readonly FileAnalyzer _fileAnalyzer;
         private readonly StatisticsService _statisticsService;
         private readonly ComparisonService _comparisonService;
+        private readonly ModuleAnalyzer _moduleAnalyzer;
+        private readonly ReleaseNotesGenerator _releaseNotesGenerator;
 
         public ReportOrchestrator(
             ILogger<ReportOrchestrator> logger,
@@ -24,8 +26,12 @@ namespace GitAnalyticsDashboard.Services
             DeveloperAnalyzer developerAnalyzer,
             FileAnalyzer fileAnalyzer,
             StatisticsService statisticsService,
-            ComparisonService comparisonService)
+            ComparisonService comparisonService,
+            ModuleAnalyzer moduleAnalyzer,
+            ReleaseNotesGenerator releaseNotesGenerator)
         {
+            _moduleAnalyzer = moduleAnalyzer;
+            _releaseNotesGenerator = releaseNotesGenerator;
             _logger = logger;
             _branchAnalyzer = branchAnalyzer;
             _commitAnalyzer = commitAnalyzer;
@@ -65,65 +71,45 @@ namespace GitAnalyticsDashboard.Services
             return reportData;
         }
 
-        public ReportData AnalyzeWithStartingBranch(
-            string path,
-            string startingBranchName,
-            List<Commit> scannedCommits,
-            Dictionary<string, List<string>> commitBranchMap,
+        /// <summary>
+        /// Builds report data for a starting-branch scan. Reuses the scan's per-commit diffs, so only the
+        /// before/after comparison (which needs file contents) diffs commits again.
+        /// </summary>
+        public ReportData AnalyzeScan(
+            Repository repo,
+            ScanResult scan,
             int staleThresholdDays,
-            int comparisonLimit = 100)
+            int comparisonLimit = 100,
+            ComparisonOptions? comparisonOptions = null,
+            ReleaseNotesOptions? releaseNotesOptions = null)
         {
-            _logger.LogInformation("Analyzing repository at {Path} starting from {StartingBranch}", path, startingBranchName);
-            var reportData = new ReportData();
+            comparisonOptions ??= new ComparisonOptions();
+            comparisonOptions.PathFilter = scan.Options.PathFilter;
+            comparisonOptions.Mailmap = scan.Options.Mailmap;
 
-            using (var repo = new Repository(path))
+            _logger.LogInformation("Building reports for {Count} commits from {Start} to {Target}", scan.Commits.Count, scan.Start.Name, scan.Target.Name);
+
+            var reportData = new ReportData
             {
-                var startingBranch = repo.Branches[startingBranchName];
+                RecentCommits = scan.CommitInfos,
+                FileChanges = scan.FileChanges
+            };
 
-                reportData.Branches = _branchAnalyzer.Analyze(repo, staleThresholdDays, startingBranch);
+            // Ahead/behind counts are relative to the starting branch (or the target when the start is a tag/SHA)
+            var baseBranch = scan.Start.Branch ?? scan.Target.Branch;
 
-                // Convert scanned commits to CommitInfo using our commitBranchMap and parent diffs
-                var commitInfos = new List<CommitInfo>();
-                foreach (var commit in scannedCommits)
-                {
-                    var branchList = commitBranchMap.TryGetValue(commit.Sha, out var bList) ? bList : new List<string> { "detached" };
-                    var branchesString = string.Join(", ", branchList.OrderBy(b => b));
+            reportData.Branches = _branchAnalyzer.Analyze(repo, staleThresholdDays, baseBranch);
+            reportData.Developers = _developerAnalyzer.Analyze(reportData.RecentCommits);
+            reportData.FileHotspots = _fileAnalyzer.AnalyzeChanges(scan.FileChanges);
+            reportData.Modules = _moduleAnalyzer.Analyze(scan.Target.Commit, scan.FileChanges, scan.Options.PathFilter);
+            reportData.ReleaseNotes = _releaseNotesGenerator.Generate(scan, releaseNotesOptions);
 
-                    var info = new CommitInfo
-                    {
-                        Sha = commit.Sha,
-                        Author = commit.Author.Name,
-                        Email = commit.Author.Email ?? string.Empty,
-                        Date = commit.Author.When,
-                        Message = commit.MessageShort,
-                        Branch = branchesString
-                    };
+            // Merge commits carry no file changes of their own in a scan (see GitScanningService)
+            var comparisonCommits = scan.Commits.Where(c => c.Parents.Count() <= 1).Take(comparisonLimit).ToList();
+            reportData.Comparisons = _comparisonService.Analyze(repo, comparisonCommits, scan.CommitBranchMap, comparisonOptions);
 
-                    if (commit.Parents.Any())
-                    {
-                        var parent = commit.Parents.First();
-                        var diff = repo.Diff.Compare<Patch>(parent.Tree, commit.Tree);
-                        info.FilesChanged = diff.Count();
-                        info.Insertions = diff.LinesAdded;
-                        info.Deletions = diff.LinesDeleted;
-                    }
-                    else
-                    {
-                        var diff = repo.Diff.Compare<Patch>(null, commit.Tree);
-                        info.FilesChanged = diff.Count();
-                        info.Insertions = diff.LinesAdded;
-                        info.Deletions = diff.LinesDeleted;
-                    }
-
-                    commitInfos.Add(info);
-                }
-
-                reportData.RecentCommits = commitInfos;
-                reportData.Developers = _developerAnalyzer.Analyze(reportData.RecentCommits);
-                reportData.FileHotspots = _fileAnalyzer.Analyze(repo, scannedCommits);
-                reportData.Comparisons = _comparisonService.Analyze(repo, scannedCommits.Take(comparisonLimit).ToList(), commitBranchMap);
-                reportData.Summary = _statisticsService.GenerateSummary(repo, reportData);
-            }
+            reportData.Summary = _statisticsService.GenerateSummary(repo, reportData);
+            _statisticsService.ApplyScanSummary(reportData.Summary, scan);
 
             return reportData;
         }

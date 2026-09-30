@@ -12,6 +12,25 @@ namespace GitAnalyticsDashboard.Services
             return Analyze(repo, repo.Commits.Take(commitLimit).ToList());
         }
 
+        /// <summary>Hotspots from already-extracted file changes, so no additional diffs are needed.</summary>
+        public List<FileStatistic> AnalyzeChanges(IEnumerable<FileChangeInfo> changes, int top = 20)
+        {
+            return changes
+                .GroupBy(c => c.FilePath)
+                .Select(g => new FileStatistic
+                {
+                    Path = g.Key,
+                    CommitCount = g.Select(c => c.CommitHash).Distinct().Count(),
+                    ContributorCount = g.Select(c => c.AuthorEmail).Distinct().Count(),
+                    TotalInsertions = g.Sum(c => c.LinesAdded),
+                    TotalDeletions = g.Sum(c => c.LinesDeleted)
+                })
+                .OrderByDescending(f => f.CommitCount)
+                .ThenByDescending(f => f.TotalInsertions + f.TotalDeletions)
+                .Take(top)
+                .ToList();
+        }
+
         public List<FileStatistic> Analyze(Repository repo, List<Commit> commits)
         {
             var fileStats = new Dictionary<string, FileStatistic>();
